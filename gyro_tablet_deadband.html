@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Gyro Tablet — deadband + timeout zeroing</title>
+  <style>
+    :root { --bg:#0b1020; --fg:#e7ecff; --mut:#8da1c0; --acc:#7bd; }
+    body { margin:0; font: 16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding: 20px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #1c2746;}
+    h1 { font-size: 18px; margin:0; color:#bcd2ff; }
+    main { padding: 18px; display:grid; gap:16px; grid-template-columns: 1fr; max-width: 900px; margin:0 auto; }
+    .card { background: #111937; border: 1px solid #1c2746; border-radius: 14px; padding: 16px; box-shadow: 0 6px 18px rgba(0,0,0,.18); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .grid { display:grid; grid-template-columns: 180px 1fr; gap:8px 14px; }
+    button { background:#15214b; color:#d9e6ff; border:1px solid #29407c; padding:10px 14px; border-radius:12px; cursor:pointer;}
+    button:hover { background:#1a2a5b; }
+    input[type="number"]{ width:100px; padding:8px 10px; border-radius:10px; border:1px solid #304378; background:#0f1736; color:#e7ecff; }
+    .ok{color:#94f3c3} .warn{color:#ffd27b} .err{color:#ff8f8f}
+    .small{color:var(--mut); font-size: 13px;}
+    .row{display:flex; gap:12px; align-items:center; flex-wrap:wrap;}
+    .pill{padding:6px 10px; border-radius:999px; background:#0f1a3b; border:1px solid #1f2f63; color:#b9caee}
+    .kbd{border:1px solid #445; background:#0b132b; padding:2px 6px; border-radius:6px;}
+    canvas{display:block; width:100%; height:180px; background:#0c1430; border-radius:10px; border:1px solid #1c2746}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Гироскоп (планшет) — обнуление при тишине/малой погрешности</h1>
+    <div class="row">
+      <span id="https" class="pill small"></span>
+      <span id="state" class="pill small">ожидание</span>
+    </div>
+  </header>
+  <main>
+
+    <section class="card">
+      <div class="row" style="justify-content:space-between">
+        <div class="row">
+          <button id="start">Старт</button>
+          <button id="stop">Стоп</button>
+        </div>
+        <div class="row small">
+          <div>Порог (°/с): <input id="th" type="number" value="4" min="0" max="30" step="0.5" /></div>
+          <div>Таймаут (мс): <input id="to" type="number" value="2000" min="200" max="10000" step="100" /></div>
+          <div>EMA α: <input id="ema" type="number" value="0.35" min="0" max="1" step="0.05" /></div>
+        </div>
+      </div>
+      <div class="grid" style="margin-top:12px">
+        <div>Источник данных:</div><div id="source" class="mono">DeviceMotion.rotationRate</div>
+        <div>Частота (мс):</div><div id="interval" class="mono">—</div>
+        <div>Состояние нулевания:</div><div id="zeroState" class="mono small">—</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3 style="margin-top:0">Угловая скорость (после мёртвой зоны)</h3>
+      <div class="grid">
+        <div>ω<sub>x</sub>:</div><div class="mono"><span id="wx">—</span> °/с</div>
+        <div>ω<sub>y</sub>:</div><div class="mono"><span id="wy">—</span> °/с</div>
+        <div>ω<sub>z</sub>:</div><div class="mono"><span id="wz">—</span> °/с</div>
+      </div>
+      <div class="small" style="margin-top:8px">Мёртвая зона применяется, если |ω<sub>x</sub>|,|ω<sub>y</sub>|,|ω<sub>z</sub>| &lt; порога (по умолчанию 4°/с) — тогда отображаем нули. Если события не приходят дольше таймаута, также отображаем нули.</div>
+      <canvas id="plot"></canvas>
+    </section>
+
+  </main>
+
+  <script>
+    const $ = sel => document.querySelector(sel);
+    const httpsEl = $('#https');
+    const stateEl = $('#state');
+    const intervalEl = $('#interval');
+    const zeroStateEl = $('#zeroState');
+    const srcEl = $('#source');
+    const wxEl = $('#wx'), wyEl = $('#wy'), wzEl = $('#wz');
+    const thEl = $('#th'), toEl = $('#to'), emaEl = $('#ema');
+    const plot = $('#plot'); const ctx = plot.getContext('2d');
+
+    httpsEl.textContent = (location.protocol === 'https:' ? 'HTTPS: ok' : '⚠ Нужен HTTPS для датчиков');
+
+    // EMA
+    let alpha = Number(emaEl.value);
+    let vx=null, vy=null, vz=null;
+    function ema(prev, val) { return prev==null ? val : (alpha*val + (1-alpha)*prev); }
+
+    // Plot buffer (deg/s)
+    const N = 180; const buf = {x:[], y:[], z:[]};
+    function pushPlot(dx,dy,dz) {
+      buf.x.push(dx); buf.y.push(dy); buf.z.push(dz);
+      if (buf.x.length>N) { buf.x.shift(); buf.y.shift(); buf.z.shift(); }
+      drawPlot();
+    }
+    function drawPlot() {
+      const w = plot.width = plot.clientWidth * devicePixelRatio;
+      const h = plot.height = plot.clientHeight * devicePixelRatio;
+      ctx.clearRect(0,0,w,h);
+      const series = [buf.x, buf.y, buf.z];
+      const colors = ['#80bfff','#7fffd4','#ffb3ba'];
+      const maxAbs = Math.max(1, ...series.flat().map(v=>Math.abs(v)));
+      const kx = w/Math.max(1,series[0].length-1);
+      const ky = (h*0.42)/maxAbs;
+      ctx.strokeStyle='#24345e'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(0,h/2); ctx.lineTo(w,h/2); ctx.stroke();
+      series.forEach((s,si)=>{
+        ctx.strokeStyle = colors[si]; ctx.lineWidth = 2;
+        ctx.beginPath();
+        s.forEach((v,i)=>{ const x=i*kx, y=h/2 - v*ky; if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+        ctx.stroke();
+      });
+    }
+
+    let lastTs = 0;
+    let lastUpdateId = 0; // increments on each motion event
+    let timer = null;
+    let running = false;
+
+    function zeroOutput(reason) {
+      wxEl.textContent = '0.00'; wyEl.textContent = '0.00'; wzEl.textContent = '0.00';
+      pushPlot(0,0,0);
+      zeroStateEl.textContent = 'нулевание: ' + reason;
+    }
+
+    function handleMotion(e) {
+      const rr = e.rotationRate || {};
+      const now = performance.now();
+      const dt  = (lastTs>0) ? (now - lastTs) : 0;
+      lastTs = now;
+      intervalEl.textContent = (e.interval ?? dt).toFixed(0);
+
+      // EMA smoothing
+      let x = rr.beta ?? 0;   // X: вперед-назад
+      let y = rr.gamma ?? 0;  // Y: влево-вправо
+      let z = rr.alpha ?? 0;  // Z: скручивание
+
+      vx = ema(vx, x);
+      vy = ema(vy, y);
+      vz = ema(vz, z);
+
+      const TH = Math.max(0, Number(thEl.value || 0)); // deg/s
+      const inDeadband = (Math.abs(vx) < TH) && (Math.abs(vy) < TH) && (Math.abs(vz) < TH);
+
+      if (inDeadband) {
+        zeroOutput('мёртвая зона (|ω|<'+TH.toFixed(2)+'°/с)');
+      } else {
+        wxEl.textContent = vx.toFixed(2);
+        wyEl.textContent = vy.toFixed(2);
+        wzEl.textContent = vz.toFixed(2);
+        pushPlot(vx, vy, vz);
+        zeroStateEl.textContent = '—';
+      }
+
+      // mark update
+      lastUpdateId++;
+    }
+
+    function start() {
+      if (running) return;
+      running = true;
+      alpha = Number(emaEl.value);
+
+      // permission (Android обычно не требует, но оставим для совместимости)
+      const needPerm = (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function');
+      const afterPerm = () => {
+        window.addEventListener('devicemotion', handleMotion, { passive: true });
+        stateEl.textContent = 'работает'; stateEl.className = 'pill small ok';
+        // timeout check loop
+        let seenId = lastUpdateId;
+        const loop = () => {
+          if (!running) return;
+          const TO = Math.max(200, Number(toEl.value || 2000));
+          if (lastUpdateId === seenId) {
+            // time elapsed since lastTs
+            if (lastTs>0 && (performance.now() - lastTs) >= TO) {
+              zeroOutput('таймаут '+TO+' мс');
+            }
+          } else {
+            seenId = lastUpdateId;
+          }
+          timer = setTimeout(loop, 200);
+        };
+        loop();
+      };
+
+      if (needPerm) {
+        DeviceMotionEvent.requestPermission().then(res => {
+          if (res !== 'granted') { stateEl.textContent = 'доступ отклонён'; stateEl.className='pill small err'; running=false; return; }
+          afterPerm();
+        }).catch(err => { stateEl.textContent = 'ошибка: '+err; stateEl.className='pill small err'; running=false; });
+      } else {
+        afterPerm();
+      }
+    }
+
+    function stop() {
+      running = false;
+      try { window.removeEventListener('devicemotion', handleMotion); } catch {}
+      try { clearTimeout(timer); } catch {}
+      stateEl.textContent = 'остановлено'; stateEl.className = 'pill small warn';
+    }
+
+    $('#start').addEventListener('click', start);
+    $('#stop').addEventListener('click', stop);
+    emaEl.addEventListener('change', ()=>{ alpha = Number(emaEl.value||0.35); });
+
+    drawPlot();
+  </script>
+</body>
+</html>
