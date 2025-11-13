@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gyro Bridge: Android → Laptop (WebRTC, без сервера)</title>
+  <style>
+    body{font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:0; color:#e7ecff; background:#0b1020}
+    main{max-width:980px; margin:0 auto; padding:24px}
+    h1{font-size:22px; margin:0 0 12px; color:#bcd2ff}
+    a{color:#7bd} code{background:#15214b; padding:2px 6px; border-radius:6px}
+    .card{background:#111937; border:1px solid #1c2746; border-radius:14px; padding:16px; margin-top:14px}
+    ol{margin:8px 0 0 18px}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Gyro Bridge: Android → Laptop (WebRTC, без сервера)</h1>
+    <div class="card">
+      <p><b>Как пользоваться</b> (нужен HTTPS — загрузи эту папку на Netlify Drop):</p>
+      <ol>
+        <li>Открой <b>phone.html</b> на <b>Android</b> телефоне в Chrome → нажми <b>«Старт»</b> → <b>«Создать оффер»</b>.</li>
+        <li>Скопируй длинную строку <b>ОФФЕР</b> и вставь её в <b>laptop.html</b> на ноутбуке → нажми <b>«Принять оффер и создать ответ»</b>.</li>
+        <li>Скопируй из ноутбука строку <b>ANSWER</b> и вставь её обратно в <b>phone.html</b> → нажми <b>«Применить ответ»</b>.</li>
+        <li>Как только канал откроется — начнётся поток гироданных (ωx/ωy/ωz) на ноутбук.</li>
+      </ol>
+      <p>Ссылки: <a href="phone.html">phone.html</a> · <a href="laptop.html">laptop.html</a></p>
+    </div>
+  </main>
+</body>
+</html>

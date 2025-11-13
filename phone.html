@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Phone → Laptop: Sender</title>
+  <style>
+    :root{--bg:#0b1020;--fg:#e7ecff;--mut:#8da1c0}
+    body{margin:0;font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;color:var(--fg);background:var(--bg)}
+    main{max-width:980px;margin:0 auto;padding:18px}
+    h1{font-size:20px;margin:0 0 8px;color:#bcd2ff}
+    .card{background:#111937;border:1px solid #1c2746;border-radius:14px;padding:14px;margin-top:12px}
+    button{padding:10px 14px;border-radius:12px;border:1px solid #29407c;background:#15214b;color:#d9e6ff}
+    button:active{transform:translateY(1px)}
+    textarea, input{width:100%;box-sizing:border-box;border-radius:10px;border:1px solid #304378;background:#0f1736;color:#e7ecff;padding:10px;font-family:ui-monospace,Menlo,Consolas,monospace}
+    label{display:block;margin:10px 0 6px;color:#c6d6ff}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .pill{padding:6px 10px;border-radius:999px;background:#0f1a3b;border:1px solid #1f2f63;color:#b9caee}
+    .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+    .ok{color:#94f3c3}.warn{color:#ffd27b}.err{color:#ff8f8f}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Телефон → Ноутбук (Sender)</h1>
+    <div class="row">
+      <span id="https" class="pill">—</span>
+      <span id="state" class="pill">ожидание</span>
+      <span id="rate" class="pill">—</span>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <button id="start">Старт (датчики)</button>
+        <button id="stop">Стоп</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label style="width:160px">Частота отправки (Гц)</label>
+        <input id="hz" type="number" min="1" max="120" step="1" value="30">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span>ωx: <span id="x" class="mono">—</span></span>
+        <span>ωy: <span id="y" class="mono">—</span></span>
+        <span>ωz: <span id="z" class="mono">—</span></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <button id="mkOffer">Создать оффер</button>
+        <button id="applyAnswer">Применить ответ</button>
+      </div>
+      <label for="offer">ОФФЕР (скопируй на ноутбук):</label>
+      <textarea id="offer" rows="6" placeholder="появится после «Создать оффер»"></textarea>
+      <label for="answer">ANSWER (вставь сюда с ноутбука):</label>
+      <textarea id="answer" rows="6" placeholder="вставь ответ и нажми «Применить ответ»"></textarea>
+    </div>
+  </main>
+
+  <script>
+    const httpsEl = document.getElementById('https');
+    const stateEl = document.getElementById('state');
+    const rateEl  = document.getElementById('rate');
+    const xEl = document.getElementById('x'), yEl = document.getElementById('y'), zEl = document.getElementById('z');
+    const hzEl = document.getElementById('hz');
+    const offerEl = document.getElementById('offer');
+    const answerEl = document.getElementById('answer');
+
+    httpsEl.textContent = (location.protocol === 'https:' ? 'HTTPS: ok' : '⚠ Требуется HTTPS');
+    function setState(s,cls){ stateEl.textContent=s; stateEl.className='pill '+(cls||''); }
+
+    // Gyro read via DeviceMotion.rotationRate (Android Chrome)
+    let lastTs=0, wx=0, wy=0, wz=0;
+    let emaX=null, emaY=null, emaZ=null; const a=0.35;
+    function ema(prev, val){ return prev==null?val:(a*val+(1-a)*prev); }
+    function onMotion(e){
+      const rr = e.rotationRate || {};
+      wx = ema(emaX, rr.beta  || 0);  emaX = wx;
+      wy = ema(emaY, rr.gamma || 0);  emaY = wy;
+      wz = ema(emaZ, rr.alpha || 0);  emaZ = wz;
+      xEl.textContent = (wx||0).toFixed(2);
+      yEl.textContent = (wy||0).toFixed(2);
+      zEl.textContent = (wz||0).toFixed(2);
+      rateEl.textContent = 'интервал: '+(e.interval? e.interval.toFixed(0)+' мс' : '—');
+    }
+
+    async function startSensors(){
+      try{
+        // Android Chrome обычно не требует requestPermission, но на всякий случай:
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
+          const res = await DeviceMotionEvent.requestPermission();
+          if (res !== 'granted'){ setState('доступ к датчикам отклонён','err'); return; }
+        }
+        window.addEventListener('devicemotion', onMotion, {passive:true});
+        setState('датчики активны','ok');
+      }catch(e){
+        setState('ошибка датчиков: '+e, 'err');
+      }
+    }
+    function stopSensors(){
+      window.removeEventListener('devicemotion', onMotion);
+      setState('остановлено','warn');
+    }
+
+    document.getElementById('start').addEventListener('click', startSensors);
+    document.getElementById('stop').addEventListener('click', stopSensors);
+
+    // WebRTC DataChannel (manual signaling)
+    const pc = new RTCPeerConnection({ iceServers:[{urls:'stun:stun.l.google.com:19302'}] });
+    const dc = pc.createDataChannel('gyro');
+    let timer=null;
+    dc.addEventListener('open', ()=>{
+      setState('канал открыт','ok');
+      const period = Math.max(1, 1000/Math.max(1, Number(hzEl.value||30)));
+      if (timer) clearInterval(timer);
+      timer = setInterval(()=>{
+        // send deg/s
+        const msg = { t: Date.now(), wx: wx||0, wy: wy||0, wz: wz||0 };
+        dc.send(JSON.stringify(msg));
+      }, period);
+    });
+    dc.addEventListener('close', ()=>{ setState('канал закрыт','warn'); if (timer) clearInterval(timer); });
+
+    async function gatherComplete(pc){
+      if (pc.iceGatheringState === 'complete') return;
+      await new Promise(resolve=>{
+        const check=()=>{ if (pc.iceGatheringState==='complete'){ pc.removeEventListener('icegatheringstatechange', check); resolve(); } };
+        pc.addEventListener('icegatheringstatechange', check);
+      });
+    }
+
+    document.getElementById('mkOffer').addEventListener('click', async ()=>{
+      try{
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await gatherComplete(pc);
+        offerEl.value = btoa(JSON.stringify(pc.localDescription));
+      }catch(e){ setState('ошибка оффера: '+e,'err'); }
+    });
+
+    document.getElementById('applyAnswer').addEventListener('click', async ()=>{
+      try{
+        const ans = JSON.parse(atob(answerEl.value.trim()));
+        await pc.setRemoteDescription(ans);
+        setState('answer применён','ok');
+      }catch(e){ setState('ошибка answer: '+e,'err'); }
+    });
+  </script>
+</body>
+</html>

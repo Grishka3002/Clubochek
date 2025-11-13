@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Laptop: Receiver</title>
+  <style>
+    :root{--bg:#0b1020;--fg:#e7ecff;--mut:#8da1c0}
+    body{margin:0;font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;color:var(--fg);background:var(--bg)}
+    main{max-width:980px;margin:0 auto;padding:18px}
+    h1{font-size:20px;margin:0 0 8px;color:#bcd2ff}
+    .card{background:#111937;border:1px solid #1c2746;border-radius:14px;padding:14px;margin-top:12px}
+    button{padding:10px 14px;border-radius:12px;border:1px solid #29407c;background:#15214b;color:#d9e6ff}
+    textarea{width:100%;box-sizing:border-box;border-radius:10px;border:1px solid #304378;background:#0f1736;color:#e7ecff;padding:10px;font-family:ui-monospace,Menlo,Consolas,monospace}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .pill{padding:6px 10px;border-radius:999px;background:#0f1a3b;border:1px solid #1f2f63;color:#b9caee}
+    .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+    canvas{display:block; width:100%; height:220px; background:#0c1430; border-radius:10px; border:1px solid #1c2746}
+    .ok{color:#94f3c3}.warn{color:#ffd27b}.err{color:#ff8f8f}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Ноутбук (Receiver)</h1>
+    <div class="row">
+      <span id="state" class="pill">ожидание</span>
+      <span id="freq" class="pill">—</span>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <button id="applyOffer">Принять оффер и создать ответ</button>
+        <button id="stop">Стоп</button>
+      </div>
+      <label for="offer">ОФФЕР с телефона:</label>
+      <textarea id="offer" rows="6" placeholder="вставь base64 описание с phone.html"></textarea>
+      <label for="answer">ANSWER (скопируй и вставь в phone.html):</label>
+      <textarea id="answer" rows="6" placeholder="появится после кнопки" readonly></textarea>
+    </div>
+
+    <div class="card">
+      <div class="row" style="gap:20px">
+        <div>ωx: <span id="x" class="mono">—</span> °/с</div>
+        <div>ωy: <span id="y" class="mono">—</span> °/с</div>
+        <div>ωz: <span id="z" class="mono">—</span> °/с</div>
+      </div>
+      <canvas id="plot"></canvas>
+    </div>
+  </main>
+
+  <script>
+    const stateEl = document.getElementById('state');
+    const freqEl = document.getElementById('freq');
+    const xEl = document.getElementById('x'), yEl = document.getElementById('y'), zEl = document.getElementById('z');
+    const offerEl = document.getElementById('offer'), answerEl = document.getElementById('answer');
+    const plot = document.getElementById('plot'); const ctx = plot.getContext('2d');
+    function setState(s,cls){ stateEl.textContent=s; stateEl.className='pill '+(cls||''); }
+
+    // plotting
+    const N=200; const buf={x:[],y:[],z:[]};
+    function pushPlot(dx,dy,dz){
+      buf.x.push(dx); buf.y.push(dy); buf.z.push(dz);
+      if (buf.x.length>N){ buf.x.shift(); buf.y.shift(); buf.z.shift(); }
+      draw();
+    }
+    function draw(){
+      const w = plot.width = plot.clientWidth*devicePixelRatio;
+      const h = plot.height = plot.clientHeight*devicePixelRatio;
+      ctx.clearRect(0,0,w,h);
+      const series=[buf.x,buf.y,buf.z], colors=['#80bfff','#7fffd4','#ffb3ba'];
+      const maxAbs = Math.max(1, ...series.flat().map(v=>Math.abs(v)));
+      const kx = w/Math.max(1,series[0].length-1);
+      const ky = (h*0.42)/maxAbs;
+      ctx.strokeStyle='#24345e'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(0,h/2); ctx.lineTo(w,h/2); ctx.stroke();
+      series.forEach((s,si)=>{
+        ctx.strokeStyle=colors[si]; ctx.lineWidth=2; ctx.beginPath();
+        s.forEach((v,i)=>{ const x=i*kx, y=h/2 - v*ky; if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+        ctx.stroke();
+      });
+    }
+
+    // WebRTC
+    const pc = new RTCPeerConnection({ iceServers:[{urls:'stun:stun.l.google.com:19302'}] });
+    let dc=null, last=performance.now(), cnt=0;
+    pc.ondatachannel = (ev)=>{
+      dc = ev.channel;
+      dc.onopen = ()=> setState('канал открыт','ok');
+      dc.onclose = ()=> setState('канал закрыт','warn');
+      dc.onmessage = (e)=>{
+        try{
+          const {t, wx, wy, wz} = JSON.parse(e.data);
+          xEl.textContent = (wx||0).toFixed(2);
+          yEl.textContent = (wy||0).toFixed(2);
+          zEl.textContent = (wz||0).toFixed(2);
+          pushPlot(wx||0, wy||0, wz||0);
+          cnt++; const now=performance.now();
+          if (now-last > 1000){ freqEl.textContent = 'частота: '+cnt+' Гц'; cnt=0; last=now; }
+        }catch{}
+      };
+    };
+
+    async function gatherComplete(pc){
+      if (pc.iceGatheringState === 'complete') return;
+      await new Promise(resolve=>{
+        const check=()=>{ if (pc.iceGatheringState==='complete'){ pc.removeEventListener('icegatheringstatechange', check); resolve(); } };
+        pc.addEventListener('icegatheringstatechange', check);
+      });
+    }
+
+    document.getElementById('applyOffer').addEventListener('click', async ()=>{
+      try{
+        const offerDesc = JSON.parse(atob(offerEl.value.trim()));
+        await pc.setRemoteDescription(offerDesc);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await gatherComplete(pc);
+        answerEl.value = btoa(JSON.stringify(pc.localDescription));
+        setState('answer создан — скопируй в телефон','ok');
+      }catch(e){ setState('ошибка: '+e,'err'); }
+    });
+
+    document.getElementById('stop').addEventListener('click', ()=>{
+      try{ pc.close(); }catch{}
+      setState('остановлено','warn');
+    });
+
+    draw();
+  </script>
+</body>
+</html>
